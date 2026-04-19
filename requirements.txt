@@ -1,0 +1,6 @@
+tensorflow
+torch
+torchvision
+torchaudio
+pandas
+matplotlib
