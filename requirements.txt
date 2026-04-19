@@ -1,6 +1,7 @@
-tensorflow
 torch
 torchvision
 torchaudio
+tensorflow
 pandas
+tqdm
 matplotlib
