@@ -1,85 +1,87 @@
-import argparse
-import time
 import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.datasets import cifar100
-import pandas as pd
+from utils import Timer, save_results
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", required=True, choices=["accuracy", "time"])
-    parser.add_argument("--target_acc", type=float, default=0.55)
-    parser.add_argument("--time_limit", type=int, default=600)
-    args = parser.parse_args()
+# Load dataset
+(x_train, y_train), (x_test, y_test) = cifar100.load_data()
 
-    MODE = args.mode
-    TARGET_ACC = args.target_acc
-    TIME_LIMIT = args.time_limit
+# Normalize
+x_train = x_train.astype('float32') / 255.0
+x_test = x_test.astype('float32') / 255.0
 
-    # load data
-    (x_train, y_train), (x_test, y_test) = cifar100.load_data()
+# One-hot encode
+num_classes = 100
+y_train = tf.keras.utils.to_categorical(y_train, num_classes)
+y_test = tf.keras.utils.to_categorical(y_test, num_classes)
 
-    x_train = x_train.astype('float32') / 255.0
-    x_test = x_test.astype('float32') / 255.0
+# Efficient dataset pipeline
+def preprocess(image, label):
+    image = tf.image.resize(image, (224, 224))
+    return image, label
 
-    num_classes = 100
-    y_train = tf.keras.utils.to_categorical(y_train, num_classes)
-    y_test = tf.keras.utils.to_categorical(y_test, num_classes)
+batch_size = 64
 
-    def preprocess(image, label):
-        image = tf.image.resize(image, (224, 224))
-        return image, label
+train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)) \
+    .shuffle(10000) \
+    .map(preprocess) \
+    .batch(batch_size) \
+    .prefetch(tf.data.AUTOTUNE)
 
-    train_ds = tf.data.Dataset.from_tensor_slices((x_train, y_train)) \
-        .shuffle(10000) \
-        .map(preprocess) \
-        .batch(64) \
-        .prefetch(tf.data.AUTOTUNE)
+test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)) \
+    .map(preprocess) \
+    .batch(batch_size) \
+    .prefetch(tf.data.AUTOTUNE)
 
-    test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)) \
-        .map(preprocess) \
-        .batch(64) \
-        .prefetch(tf.data.AUTOTUNE)
+# ResNet-like model
+def residual_block(x, filters, stride=1):
+    shortcut = x
 
-    # simple ResNet-like model
-    inputs = layers.Input(shape=(224, 224, 3))
-    x = layers.Conv2D(64, 3, padding='same', activation='relu')(inputs)
-    x = layers.GlobalAveragePooling2D()(x)
-    outputs = layers.Dense(num_classes, activation='softmax')(x)
+    x = layers.Conv2D(filters, 3, strides=stride, padding='same')(x)
+    x = layers.BatchNormalization()(x)
+    x = layers.ReLU()(x)
 
-    model = models.Model(inputs, outputs)
+    x = layers.Conv2D(filters, 3, padding='same')(x)
+    x = layers.BatchNormalization()(x)
 
-    model.compile(optimizer='adam',
-                  loss='categorical_crossentropy',
-                  metrics=['accuracy'])
+    if stride != 1 or shortcut.shape[-1] != filters:
+        shortcut = layers.Conv2D(filters, 1, strides=stride)(shortcut)
+        shortcut = layers.BatchNormalization()(shortcut)
 
-    start_time = time.time()
-    results = []
+    x = layers.Add()([x, shortcut])
+    x = layers.ReLU()(x)
+    return x
 
-    for epoch in range(50):
-        print(f"\nEpoch {epoch+1}")
+inputs = layers.Input(shape=(224,224,3))
+x = layers.Conv2D(64, 7, strides=2, padding='same')(inputs)
+x = layers.BatchNormalization()(x)
+x = layers.ReLU()(x)
+x = layers.MaxPool2D(3, strides=2, padding='same')(x)
 
-        history = model.fit(train_ds, validation_data=test_ds, epochs=1, verbose=1)
+for filters in [64, 128, 256, 512]:
+    x = residual_block(x, filters, stride=2)
 
-        acc = history.history['val_accuracy'][0]
-        elapsed = time.time() - start_time
+x = layers.GlobalAveragePooling2D()(x)
+outputs = layers.Dense(num_classes, activation='softmax')(x)
 
-        print(f"Accuracy: {acc:.4f} | Time: {elapsed:.2f}s")
+model = models.Model(inputs, outputs)
 
-        results.append([epoch+1, acc, elapsed])
+model.compile(
+    optimizer='adam',
+    loss='categorical_crossentropy',
+    metrics=['accuracy']
+)
 
-        if MODE == "accuracy" and acc >= TARGET_ACC:
-            print("Reached target accuracy")
-            break
+# Train
+timer = Timer()
+timer.start()
 
-        if MODE == "time" and elapsed >= TIME_LIMIT:
-            print("Reached time limit")
-            break
+history = model.fit(train_ds, validation_data=test_ds, epochs=10)
 
-    df = pd.DataFrame(results, columns=["Epoch", "Accuracy", "Time"])
-    df.to_csv(f"results_tf_{MODE}.csv", index=False)
+total_time = timer.stop()
+final_acc = history.history['val_accuracy'][-1]
 
-    print("Saved results!")
+print("TensorFlow Time:", total_time)
+print("TensorFlow Accuracy:", final_acc)
 
-if __name__ == "__main__":
-    main()
+save_results("TensorFlow", total_time, final_acc)
